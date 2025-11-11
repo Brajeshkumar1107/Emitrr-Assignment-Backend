@@ -585,6 +585,47 @@ func (h *Hub) handlePlayAgain(client *Client) {
 			}
 			return "(nil)"
 		}())
+
+		// If either side is a bot, ensure immediate rematch with a fresh bot client to avoid
+		// any stale state/timers. Also ensure human clients have a send channel.
+		if (p1 != nil && p1.isBot) || (p2 != nil && p2.isBot) {
+			// Prefer human as player1 for rematch; if player1 is bot, swap
+			var human *Client
+			if p1 != nil && !p1.isBot {
+				human = p1
+			} else if p2 != nil && !p2.isBot {
+				human = p2
+			}
+
+			// Ensure human client has a send channel
+			if human != nil && human.send == nil && human.conn != nil {
+				human.send = make(chan []byte, 256)
+				h.clients[human] = true
+				log.Printf("[BACKEND] Reinitialized send channel for human client %s", human.username)
+			}
+
+			// Create a fresh bot client
+			botClient := &Client{
+				hub:      h,
+				conn:     nil,
+				send:     nil,
+				username: "AI Bot",
+				isBot:    true,
+			}
+
+			// Start rematch between human and new bot client
+			if human != nil {
+				log.Printf("[BACKEND] Starting immediate rematch human=%s vs bot", human.username)
+				h.createGame(human, botClient)
+			} else {
+				// No human found (both nil or both bots?) — fall back to original players
+				log.Printf("[BACKEND] No human found for rematch, falling back to original clients")
+				h.createGame(p1, p2)
+			}
+			return
+		}
+
+		// Normal rematch between two human players
 		h.createGame(p1, p2)
 	}
 }

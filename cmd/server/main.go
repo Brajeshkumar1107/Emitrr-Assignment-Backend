@@ -10,9 +10,17 @@ import (
 	"github.com/connect4/backend/internal/analytics"
 	"github.com/connect4/backend/internal/database"
 	"github.com/connect4/backend/internal/ws"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	// Load .env.local for local development (only if not on Railway)
+	if os.Getenv("RAILWAY_ENVIRONMENT_NAME") == "" {
+		if err := godotenv.Load(".env.local"); err != nil {
+			log.Println("Note: .env.local not found, using system environment variables")
+		}
+	}
+
 	log.Println("Starting Connect 4 Game Server...")
 
 	// Initialize database (optional - can be disabled for testing)
@@ -83,12 +91,36 @@ func main() {
 	}
 	go hub.Run()
 
+	// Define allowed origins
+	allowedOrigins := []string{
+		"https://emitrr-assignment-frontend-9xvs.vercel.app",
+		"http://localhost:3000",
+		"http://localhost:5173",
+	}
+
+	// CORS middleware helper
+	corsMiddleware := func(w http.ResponseWriter, r *http.Request, allowedOrigins []string) bool {
+		origin := r.Header.Get("Origin")
+		for _, allowed := range allowedOrigins {
+			if origin == allowed {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				return true
+			}
+		}
+		// Allow all for WebSocket (can restrict later if needed)
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		return true
+	}
+
 	// Handle WebSocket connections
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		// CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// CORS headers for WebSocket
+		corsMiddleware(w, r, allowedOrigins)
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -100,15 +132,22 @@ func main() {
 
 	// Handle active users endpoint
 	http.HandleFunc("/active-users", func(w http.ResponseWriter, r *http.Request) {
+		// CORS headers
+		corsMiddleware(w, r, allowedOrigins)
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		hub.HandleActiveUsers(w, r)
 	})
 
 	// Handle leaderboard endpoint
 	http.HandleFunc("/leaderboard", func(w http.ResponseWriter, r *http.Request) {
 		// CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		corsMiddleware(w, r, allowedOrigins)
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method == "OPTIONS" {
@@ -161,11 +200,9 @@ func main() {
 		json.NewEncoder(w).Encode(stats)
 	})
 
-	// Handle CORS for development
+	// Handle root path
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		corsMiddleware(w, r, allowedOrigins)
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -175,8 +212,9 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	// Start server - port configurable via SERVER_PORT env var (default 8080)
-	port := getEnv("SERVER_PORT", "8080")
+	// Start server - port configurable via PORT env var (Railway uses PORT)
+	// Falls back to SERVER_PORT or 8080 for local development
+	port := getEnv("PORT", getEnv("SERVER_PORT", "8080"))
 	log.Printf("Server running on :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal("ListenAndServe: ", err)

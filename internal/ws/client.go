@@ -27,32 +27,49 @@ const (
 
 // ServeWs handles WebSocket connections for a client
 func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	log.Printf("[BACKEND-1] ServeWs: New WebSocket connection request from origin: %s", r.Header.Get("Origin"))
+	origin := r.Header.Get("Origin")
+	log.Printf("[BACKEND-1] ServeWs: New WebSocket connection request from origin: %s", origin)
+	
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
+			log.Printf("[BACKEND-WS-CHECK] Checking origin: %s", origin)
 
-			// Get allowed origins from environment variable
-			allowedOriginsEnv := os.Getenv("ALLOWED_ORIGINS")
-
-			// If no allowed origins are set, allow localhost in development
-			if allowedOriginsEnv == "" {
-				return strings.HasPrefix(origin, "http://localhost:") ||
-					strings.HasPrefix(origin, "https://localhost:") ||
-					strings.HasPrefix(origin, "http://127.0.0.1:") ||
-					strings.HasPrefix(origin, "https://127.0.0.1:")
+			// Allowed origins for production and development
+			allowedOrigins := []string{
+				"https://emitrr-assignment-frontend-9xvs.vercel.app",
+				"http://localhost:3000",
+				"http://localhost:5173",
+				"http://localhost:8080",
+				"http://127.0.0.1:3000",
+				"http://127.0.0.1:5173",
+				"http://127.0.0.1:8080",
 			}
 
-			// Check if origin is in allowed list
-			allowedOrigins := strings.Split(allowedOriginsEnv, ",")
+			// Check against allowed list
 			for _, allowed := range allowedOrigins {
-				allowed = strings.TrimSpace(allowed)
-				if allowed == origin {
+				if origin == allowed {
+					log.Printf("[BACKEND-WS-CHECK] ✓ Origin ALLOWED: %s", origin)
 					return true
 				}
 			}
+
+			// Check environment variable for custom allowed origins
+			allowedOriginsEnv := os.Getenv("ALLOWED_ORIGINS")
+			if allowedOriginsEnv != "" {
+				envOrigins := strings.Split(allowedOriginsEnv, ",")
+				for _, allowed := range envOrigins {
+					allowed = strings.TrimSpace(allowed)
+					if origin == allowed {
+						log.Printf("[BACKEND-WS-CHECK] ✓ Origin ALLOWED (from env): %s", origin)
+						return true
+					}
+				}
+			}
+
+			log.Printf("[BACKEND-WS-CHECK] ✗ Origin REJECTED: %s (not in allowed list)", origin)
 			return false
 		},
 	}

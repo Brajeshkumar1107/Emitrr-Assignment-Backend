@@ -98,7 +98,7 @@ func main() {
 		"http://localhost:5173",
 	}
 
-	// CORS middleware helper
+	// CORS middleware helper for HTTP requests
 	corsMiddleware := func(w http.ResponseWriter, r *http.Request, allowedOrigins []string) bool {
 		origin := r.Header.Get("Origin")
 		for _, allowed := range allowedOrigins {
@@ -110,23 +110,46 @@ func main() {
 				return true
 			}
 		}
-		// Allow all for WebSocket (can restrict later if needed)
+		// Allow all for fallback
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		return true
 	}
 
+	// Check if origin is allowed for WebSocket
+	isOriginAllowed := func(origin string) bool {
+		// Remove trailing slash if present
+		if len(origin) > 0 && origin[len(origin)-1] == '/' {
+			origin = origin[:len(origin)-1]
+		}
+		for _, allowed := range allowedOrigins {
+			if origin == allowed {
+				return true
+			}
+		}
+		return false
+	}
+
 	// Handle WebSocket connections
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		// CORS headers for WebSocket
-		corsMiddleware(w, r, allowedOrigins)
+		origin := r.Header.Get("Origin")
+		
+		// Log the connection attempt
+		log.Printf("WebSocket connection attempt from origin: %s", origin)
+		
+		// Check if origin is allowed
+		if origin != "" && !isOriginAllowed(origin) {
+			log.Printf("WebSocket connection rejected - origin not allowed: %s", origin)
+		}
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 
+		// Allow WebSocket upgrade from allowed origins or localhost for development
+		// Note: WebSocket doesn't use standard CORS, browser handles it automatically after connection
 		ws.ServeWs(hub, w, r)
 	})
 

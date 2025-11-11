@@ -524,6 +524,15 @@ func (h *Hub) handlePlayAgain(client *Client) {
 	}
 	g.PlayAgainRequests = append(g.PlayAgainRequests, client.username)
 
+	// Debug: log current playAgain request and client/game status
+	log.Printf("[BACKEND-PLAYAGAIN] Received playAgain from %s for gameID=%s", client.username, client.gameID)
+	if g.player1Client != nil {
+		log.Printf("[BACKEND-PLAYAGAIN] player1=%s sendNil=%v connNil=%v isBot=%v", g.player1Client.username, g.player1Client.send == nil, g.player1Client.conn == nil, g.player1Client.isBot)
+	}
+	if g.player2Client != nil {
+		log.Printf("[BACKEND-PLAYAGAIN] player2=%s sendNil=%v connNil=%v isBot=%v", g.player2Client.username, g.player2Client.send == nil, g.player2Client.conn == nil, g.player2Client.isBot)
+	}
+
 	// Broadcast playAgainUpdate to both players
 	payload := map[string]interface{}{
 		"playAgainRequests": g.PlayAgainRequests,

@@ -644,13 +644,12 @@ func (h *Hub) handlePlayAgain(client *Client) {
 				human = p2
 			}
 
-			// Ensure human client has a send channel and running writePump before creating gameStart
+			// Ensure human client has a send channel
 			if human != nil {
 				if human.send == nil && human.conn != nil {
+					// Only recreate send channel if conn exists but send was closed
 					human.send = make(chan []byte, 256)
-					// Start writePump in a new goroutine so it can send the gameStart message
-					go human.writePump()
-					log.Printf("[BACKEND] Reinitialized send channel and writePump for human client %s", human.username)
+					log.Printf("[BACKEND] Reinitialized send channel for human client %s (connection active)", human.username)
 				}
 
 				// Create a fresh bot client

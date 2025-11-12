@@ -456,13 +456,6 @@ func (h *Hub) createGame(player1, player2 *Client) {
 	if data, err := json.Marshal(msg); err == nil {
 		log.Printf("[BACKEND-18] Hub.createGame: GameStart message marshaled, size=%d bytes", len(data))
 		// Send to player1 if they have a send channel
-		// Ensure player1 has a send channel and a running writePump if they have an active connection
-		if player1.send == nil && player1.conn != nil {
-			player1.send = make(chan []byte, 256)
-			// Start writePump for reinitialized client
-			go player1.writePump()
-			log.Printf("[BACKEND-REINIT] Hub.createGame: Reinitialized send/writePump for player1=%s", player1.username)
-		}
 		if player1.send != nil {
 			log.Printf("[BACKEND-19] Hub.createGame: Sending gameStart to player1=%s", player1.username)
 			select {
@@ -476,20 +469,14 @@ func (h *Hub) createGame(player1, player2 *Client) {
 		}
 		// Send to player2 only if they're not a bot (bots don't have send channels)
 		if player2 != nil && !player2.isBot {
-			// Ensure player2 has a send channel and writePump if they have a connection
-			if player2.send == nil && player2.conn != nil {
-				player2.send = make(chan []byte, 256)
-				go player2.writePump()
-				log.Printf("[BACKEND-REINIT] Hub.createGame: Reinitialized send/writePump for player2=%s", player2.username)
-			}
 			if player2.send != nil {
-			log.Printf("[BACKEND-19] Hub.createGame: Sending gameStart to player2=%s", player2.username)
-			select {
-			case player2.send <- data:
-				log.Printf("[BACKEND-20] Hub.createGame: gameStart message sent to player2=%s", player2.username)
-			default:
-				log.Printf("[BACKEND-19] Hub.createGame: Failed to send game start to player2: %s (channel full)", player2.username)
-			}
+				log.Printf("[BACKEND-19] Hub.createGame: Sending gameStart to player2=%s", player2.username)
+				select {
+				case player2.send <- data:
+					log.Printf("[BACKEND-20] Hub.createGame: gameStart message sent to player2=%s", player2.username)
+				default:
+					log.Printf("[BACKEND-19] Hub.createGame: Failed to send game start to player2: %s (channel full)", player2.username)
+				}
 			} else {
 				log.Printf("[BACKEND-19] Hub.createGame: player2=%s has no send channel (connection missing)", player2.username)
 			}

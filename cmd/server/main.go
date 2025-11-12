@@ -16,7 +16,7 @@ import (
 
 func main() {
 	// -----------------------------------------
-	// Load local .env file for local development
+	// Load .env.local for local development
 	// -----------------------------------------
 	if os.Getenv("RAILWAY_ENVIRONMENT_NAME") == "" {
 		if err := godotenv.Load(".env.local"); err != nil {
@@ -33,16 +33,15 @@ func main() {
 	var err error
 
 	if os.Getenv("DATABASE_URL") != "" {
-		// Railway's default connection method
+		// Railway DATABASE_URL connection
 		log.Println("[DB] Connecting using DATABASE_URL...")
-		db, err = database.NewDB(database.Config{}) // database.go handles DATABASE_URL internally
+		db, err = database.NewDB(database.Config{})
 		if err != nil {
-			log.Printf("❌ Database connection failed: %v", err)
-		} else {
-			log.Println("✅ Database connected successfully (via DATABASE_URL)")
+			log.Fatalf("❌ Database connection failed: %v", err)
 		}
+		log.Println("✅ Database connected successfully (via DATABASE_URL)")
 	} else if os.Getenv("PGHOST") != "" {
-		// Railway's PG* environment variables
+		// Railway PG* environment vars
 		log.Println("[DB] Connecting using PG* environment variables...")
 		portStr := os.Getenv("PGPORT")
 		port, _ := strconv.Atoi(portStr)
@@ -55,31 +54,64 @@ func main() {
 		}
 		db, err = database.NewDB(dbConfig)
 		if err != nil {
-			log.Printf("❌ Database connection failed: %v", err)
-		} else {
-			log.Println("✅ Database connected successfully (via PGHOST)")
+			log.Fatalf("❌ Database connection failed: %v", err)
 		}
-	} else if os.Getenv("DB_HOST") != "" {
-		// Local dev fallback
-		log.Println("[DB] Connecting using local environment variables...")
-		db, err = database.NewDB(database.Config{
-			Host:     getEnv("DB_HOST", "localhost"),
-			Port:     5432,
-			User:     getEnv("DB_USER", "postgres"),
-			Password: getEnv("DB_PASSWORD", "postgres"),
-			DBName:   getEnv("DB_NAME", "connect4"),
-		})
-		if err != nil {
-			log.Printf("❌ Local database connection failed: %v", err)
-		} else {
-			log.Println("✅ Local database connected successfully")
-		}
+		log.Println("✅ Database connected successfully (via PGHOST)")
 	} else {
 		log.Println("⚠️ No database configuration found. Running without DB.")
 	}
 
 	// -----------------------------------------
-	// Initialize Kafka (Optional - Safe Fallback)
+	// 🧱 Auto-create schema (tables + view)
+	// -----------------------------------------
+	if db != nil {
+		schemaSQL := `
+CREATE TABLE IF NOT EXISTS players (
+	id SERIAL PRIMARY KEY,
+	username VARCHAR(50) UNIQUE NOT NULL,
+	games_played INT DEFAULT 0,
+	games_won INT DEFAULT 0,
+	created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS games (
+	id SERIAL PRIMARY KEY,
+	player1_id INT NOT NULL,
+	player2_id INT,
+	winner_id INT,
+	is_bot_game BOOLEAN DEFAULT FALSE,
+	start_time TIMESTAMP NOT NULL,
+	end_time TIMESTAMP,
+	game_state JSON,
+	FOREIGN KEY (player1_id) REFERENCES players(id),
+	FOREIGN KEY (player2_id) REFERENCES players(id),
+	FOREIGN KEY (winner_id) REFERENCES players(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_players_games_won ON players(games_won DESC);
+
+CREATE OR REPLACE VIEW leaderboard AS
+SELECT 
+	username,
+	games_played,
+	games_won,
+	CASE 
+		WHEN games_played > 0 THEN ROUND((games_won::numeric / games_played::numeric) * 100, 2)
+		ELSE 0
+	END AS win_percentage
+FROM players
+WHERE games_played > 0
+ORDER BY games_won DESC, win_percentage DESC;
+`
+		if _, err := db.ExecContext(context.Background(), schemaSQL); err != nil {
+			log.Printf("⚠️ Failed to initialize schema: %v", err)
+		} else {
+			log.Println("✅ Database schema ensured (tables & leaderboard view ready)")
+		}
+	}
+
+	// -----------------------------------------
+	// Initialize Kafka (Optional)
 	// -----------------------------------------
 	var producer *analytics.Producer
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
@@ -87,7 +119,7 @@ func main() {
 		brokers := []string{kafkaBrokers}
 		producer, err = analytics.NewProducer(brokers, "game-events")
 		if err != nil {
-			log.Printf("Warning: Kafka producer initialization failed: %v", err)
+			log.Printf("Warning: Kafka producer init failed: %v", err)
 		} else {
 			log.Println("Kafka producer initialized successfully")
 			defer producer.Close()
@@ -99,7 +131,7 @@ func main() {
 		brokers := []string{kafkaBrokers}
 		consumer, err = analytics.NewConsumer(brokers, "analytics-group", db.DB)
 		if err != nil {
-			log.Printf("Warning: Kafka consumer initialization failed: %v", err)
+			log.Printf("Warning: Kafka consumer init failed: %v", err)
 		} else {
 			log.Println("Kafka consumer initialized successfully")
 			if _, err := db.DB.Exec(analytics.CreateAnalyticsTableSQL); err != nil {

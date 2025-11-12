@@ -47,7 +47,7 @@ type Player struct {
 type Game struct {
 	ID        int                    `json:"id"`
 	Player1ID int                    `json:"player1Id"`
-	Player2ID *int                   `json:"player2Id,omitempty"`
+	Player2ID int                    `json:"player2Id"`
 	WinnerID  *int                   `json:"winnerId,omitempty"`
 	IsBotGame bool                   `json:"isBotGame"`
 	StartTime time.Time              `json:"startTime"`
@@ -75,7 +75,7 @@ func NewDB(config Config) (*DB, error) {
 		return nil, fmt.Errorf("error opening database: %v", err)
 	}
 
-	// Connection pool setup
+	// Connection pool
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
@@ -98,7 +98,6 @@ func (db *DB) CreatePlayer(ctx context.Context, username string) (*Player, error
 	query := `
 		INSERT INTO players (username)
 		VALUES ($1)
-		ON CONFLICT (username) DO NOTHING
 		RETURNING id, username, games_played, games_won, created_at`
 
 	var player Player
@@ -109,12 +108,6 @@ func (db *DB) CreatePlayer(ctx context.Context, username string) (*Player, error
 		&player.GamesWon,
 		&player.CreatedAt,
 	)
-
-	if err == sql.ErrNoRows {
-		// Player already exists, fetch it
-		return db.GetPlayer(ctx, username)
-	}
-
 	if err != nil {
 		return nil, fmt.Errorf("error creating player: %v", err)
 	}
@@ -145,7 +138,7 @@ func (db *DB) GetPlayer(ctx context.Context, username string) (*Player, error) {
 	return &player, nil
 }
 
-// CreateGame creates a new game record safely (handles bot games)
+// CreateGame creates a new game record
 func (db *DB) CreateGame(ctx context.Context, player1ID int, player2ID *int, isBotGame bool) (*Game, error) {
 	query := `
 		INSERT INTO games (player1_id, player2_id, is_bot_game, start_time)
@@ -153,28 +146,27 @@ func (db *DB) CreateGame(ctx context.Context, player1ID int, player2ID *int, isB
 		RETURNING id, player1_id, player2_id, is_bot_game, start_time`
 
 	var game Game
-	var player2 sql.NullInt64
+	var p2 interface{}
+	if player2ID == nil {
+		p2 = nil
+	} else {
+		p2 = *player2ID
+	}
 
-	err := db.QueryRowContext(ctx, query, player1ID, player2ID, isBotGame).Scan(
+	err := db.QueryRowContext(ctx, query, player1ID, p2, isBotGame).Scan(
 		&game.ID,
 		&game.Player1ID,
-		&player2,
+		&game.Player2ID,
 		&game.IsBotGame,
 		&game.StartTime,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("error creating game: %v", err)
 	}
-
-	if player2.Valid {
-		player2IDVal := int(player2.Int64)
-		game.Player2ID = &player2IDVal
-	}
-
 	return &game, nil
 }
 
-// UpdateGameResult updates the game result and player statistics
+// UpdateGameResult updates the game result
 func (db *DB) UpdateGameResult(ctx context.Context, gameID, winnerID int, gameState map[string]interface{}) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -194,7 +186,6 @@ func (db *DB) UpdateGameResult(ctx context.Context, gameID, winnerID int, gameSt
 		winnerParam = winnerID
 	}
 
-	// Update game record
 	_, err = tx.ExecContext(ctx, `
 		UPDATE games 
 		SET winner_id = $1, end_time = CURRENT_TIMESTAMP, game_state = $2
@@ -205,7 +196,6 @@ func (db *DB) UpdateGameResult(ctx context.Context, gameID, winnerID int, gameSt
 		return fmt.Errorf("error updating game: %v", err)
 	}
 
-	// Update player stats
 	_, err = tx.ExecContext(ctx, `
 		UPDATE players p
 		SET games_played = p.games_played + 1,
@@ -225,8 +215,6 @@ func (db *DB) UpdateGameResult(ctx context.Context, gameID, winnerID int, gameSt
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("error committing transaction: %v", err)
 	}
-
-	log.Printf("[DB] ✅ Game %d result saved successfully (winnerID=%v)", gameID, winnerParam)
 	return nil
 }
 

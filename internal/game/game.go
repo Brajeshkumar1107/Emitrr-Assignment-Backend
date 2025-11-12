@@ -1,10 +1,13 @@
 package game
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/connect4/backend/internal/database"
 )
 
 // Player represents a player in the game
@@ -36,11 +39,13 @@ type Game struct {
 	IsActive     bool
 	StartTime    int64
 	LastMoveTime int64
+	DB           *database.DB
+	DBGameID     int // ID of this game record in DB
 }
 
-// NewGame creates a new game instance
-func NewGame(player1, player2 Player) *Game {
-	return &Game{
+// NewGame creates a new game instance and inserts it into the database
+func NewGame(db *database.DB, player1, player2 Player) (*Game, error) {
+	g := &Game{
 		ID: uuid.New().String(),
 		Board: Board{
 			Columns: 7,
@@ -51,7 +56,54 @@ func NewGame(player1, player2 Player) *Game {
 		CurrentTurn: 1,
 		IsActive:    true,
 		StartTime:   time.Now().Unix(),
+		DB:          db,
 	}
+
+	// Create DB record if DB is provided
+	if db != nil {
+		ctx := context.Background()
+
+		// Ensure both players exist in DB
+		player1Entity, err := db.GetPlayer(ctx, player1.Username)
+		if err != nil {
+			log.Printf("[DB] Error fetching player1: %v", err)
+		}
+		if player1Entity == nil {
+			player1Entity, err = db.CreatePlayer(ctx, player1.Username)
+			if err != nil {
+				log.Printf("[DB] Error creating player1: %v", err)
+			}
+		}
+
+		var player2Entity *database.Player
+		if !player2.IsBot {
+			player2Entity, err = db.GetPlayer(ctx, player2.Username)
+			if err != nil {
+				log.Printf("[DB] Error fetching player2: %v", err)
+			}
+			if player2Entity == nil {
+				player2Entity, err = db.CreatePlayer(ctx, player2.Username)
+				if err != nil {
+					log.Printf("[DB] Error creating player2: %v", err)
+				}
+			}
+		}
+
+		var p2ID *int
+		if player2Entity != nil {
+			p2ID = &player2Entity.ID
+		}
+
+		gameRecord, err := db.CreateGame(ctx, player1Entity.ID, p2ID, player2.IsBot)
+		if err != nil {
+			log.Printf("DB error creating game record: %v", err)
+		} else {
+			g.DBGameID = gameRecord.ID
+			log.Printf("[DB] Game record created with ID=%d (isBotGame=%v)", g.DBGameID, player2.IsBot)
+		}
+	}
+
+	return g, nil
 }
 
 // MakeMove attempts to make a move in the specified column
@@ -60,23 +112,75 @@ func (g *Game) MakeMove(column int) error {
 		return fmt.Errorf("invalid move: column %d is full or out of bounds", column)
 	}
 
-	// Find the lowest empty position in the column
 	row := 5 // Start from bottom
 	for row >= 0 && g.Board.Grid[row][column] != 0 {
 		row--
 	}
 
-	// Make the move
 	g.Board.Grid[row][column] = g.CurrentTurn
 	g.Board.LastMove.Row = row
 	g.Board.LastMove.Column = column
 	g.Board.LastMove.Player = g.CurrentTurn
 
-	// Update game state
 	g.LastMoveTime = time.Now().Unix()
 	g.CurrentTurn = 3 - g.CurrentTurn // Switch between 1 and 2
 
+	// Check for win or draw after every move
+	g.CheckGameCompletion()
+
 	return nil
+}
+
+// CheckGameCompletion checks if game ended (win or draw) and saves to DB
+func (g *Game) CheckGameCompletion() {
+	if g.CheckWin() {
+		g.IsActive = false
+		winner := g.Board.LastMove.Player
+		log.Printf("[GAME] Player %d wins! (GameID=%s)", winner, g.ID)
+		g.saveGameResult(winner)
+	} else if g.Board.IsBoardFull() {
+		g.IsActive = false
+		log.Printf("[GAME] Game %s ended in a draw", g.ID)
+		g.saveGameResult(0)
+	}
+}
+
+// saveGameResult writes the result of the game into the database
+func (g *Game) saveGameResult(winner int) {
+	if g.DB == nil || g.DBGameID == 0 {
+		return
+	}
+
+	ctx := context.Background()
+
+	var winnerID int
+	if winner == 1 {
+		if playerEntity, err := g.DB.GetPlayer(ctx, g.Player1.Username); err == nil && playerEntity != nil {
+			winnerID = playerEntity.ID
+		}
+	} else if winner == 2 && !g.Player2.IsBot {
+		if playerEntity, err := g.DB.GetPlayer(ctx, g.Player2.Username); err == nil && playerEntity != nil {
+			winnerID = playerEntity.ID
+		}
+	}
+
+	// Convert game state
+	gameState := map[string]interface{}{
+		"id":        g.ID,
+		"grid":      g.Board.Grid,
+		"lastMove":  g.Board.LastMove,
+		"isActive":  g.IsActive,
+		"startTime": g.StartTime,
+	}
+
+	go func() {
+		err := g.DB.UpdateGameResult(ctx, g.DBGameID, winnerID, gameState)
+		if err != nil {
+			log.Printf("[DB] ❌ Error saving game result (GameID=%d): %v", g.DBGameID, err)
+		} else {
+			log.Printf("[DB] ✅ Game result saved successfully (GameID=%d, WinnerID=%v)", g.DBGameID, winnerID)
+		}
+	}()
 }
 
 // CheckWin checks if the last move resulted in a win
@@ -85,7 +189,7 @@ func (g *Game) CheckWin() bool {
 	col := g.Board.LastMove.Column
 	player := g.Board.LastMove.Player
 
-	// Check horizontal
+	// Horizontal
 	for c := 0; c <= 3; c++ {
 		count := 0
 		for i := 0; i < 4; i++ {
@@ -98,7 +202,7 @@ func (g *Game) CheckWin() bool {
 		}
 	}
 
-	// Check vertical
+	// Vertical
 	for r := 0; r <= 3; r++ {
 		count := 0
 		for i := 0; i < 4; i++ {
@@ -111,7 +215,7 @@ func (g *Game) CheckWin() bool {
 		}
 	}
 
-	// Check diagonal (top-left to bottom-right)
+	// Diagonal (top-left → bottom-right)
 	for i := -3; i <= 0; i++ {
 		count := 0
 		for j := 0; j < 4; j++ {
@@ -126,7 +230,7 @@ func (g *Game) CheckWin() bool {
 		}
 	}
 
-	// Check diagonal (top-right to bottom-left)
+	// Diagonal (top-right → bottom-left)
 	for i := -3; i <= 0; i++ {
 		count := 0
 		for j := 0; j < 4; j++ {
@@ -145,9 +249,9 @@ func (g *Game) CheckWin() bool {
 }
 
 // IsBoardFull checks if the board is completely filled
-func (g *Board) IsBoardFull() bool {
+func (b *Board) IsBoardFull() bool {
 	for col := 0; col < 7; col++ {
-		if g.Grid[0][col] == 0 { // Check top row
+		if b.Grid[0][col] == 0 {
 			return false
 		}
 	}
@@ -155,12 +259,9 @@ func (g *Board) IsBoardFull() bool {
 }
 
 // IsValidMove checks if a move can be made in the specified column
-func (g *Board) IsValidMove(column int) bool {
-	// Check if column is within bounds
+func (b *Board) IsValidMove(column int) bool {
 	if column < 0 || column >= 7 {
 		return false
 	}
-
-	// Check if column is not full (top position is empty)
-	return g.Grid[0][column] == 0
+	return b.Grid[0][column] == 0
 }

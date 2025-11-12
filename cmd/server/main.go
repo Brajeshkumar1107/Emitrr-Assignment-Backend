@@ -93,6 +93,9 @@ func main() {
 
 	// Define allowed origins
 	allowedOrigins := []string{
+		// Production frontend (current and legacy) - include with and without trailing slash
+		"https://emitrr-assignment-frontend.vercel.app",
+		"https://emitrr-assignment-frontend.vercel.app/",
 		"https://emitrr-assignment-frontend-9xvs.vercel.app",
 		"https://emitrr-assignment-frontend-9xvs.vercel.app/",
 		"http://localhost:3000",
@@ -140,9 +143,11 @@ func main() {
 		// Log the connection attempt
 		log.Printf("WebSocket connection attempt from origin: %s", origin)
 
-		// Check if origin is allowed
+		// Check if origin is allowed; if not, reject the upgrade to avoid confusing logs
 		if origin != "" && !isOriginAllowed(origin) {
 			log.Printf("WebSocket connection rejected - origin not allowed: %s", origin)
+			http.Error(w, "Origin not allowed", http.StatusForbidden)
+			return
 		}
 
 		if r.Method == "OPTIONS" {

@@ -29,7 +29,7 @@ const (
 func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	log.Printf("[BACKEND-1] ServeWs: New WebSocket connection request from origin: %s", origin)
-	
+
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
@@ -40,12 +40,17 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 			// Allowed origins for production and development
 			allowedOrigins := []string{
 				"https://emitrr-assignment-frontend-9xvs.vercel.app",
+				"https://emitrr-assignment-frontend-9xvs.vercel.app/",
 				"http://localhost:3000",
+				"http://localhost:3001",
 				"http://localhost:5173",
+				"http://127.0.0.1:3001",
 				"http://localhost:8080",
+				"http://localhost:3001",
 				"http://127.0.0.1:3000",
 				"http://127.0.0.1:5173",
 				"http://127.0.0.1:8080",
+				"http://127.0.0.1:3001",
 			}
 
 			// Check against allowed list

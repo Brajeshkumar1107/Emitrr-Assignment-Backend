@@ -525,7 +525,7 @@ func (h *Hub) handlePlayAgain(client *Client) {
 	g.PlayAgainRequests = append(g.PlayAgainRequests, client.username)
 
 	// Debug: log current playAgain request and client/game status
-	log.Printf("[BACKEND-PLAYAGAIN] Received playAgain from %s for gameID=%s", client.username, client.gameID)
+	log.Printf("[BACKEND-PLAYAGAIN] Received playAgain from %s for gameID=%s, total requests=%d", client.username, client.gameID, len(g.PlayAgainRequests))
 	if g.player1Client != nil {
 		log.Printf("[BACKEND-PLAYAGAIN] player1=%s sendNil=%v connNil=%v isBot=%v", g.player1Client.username, g.player1Client.send == nil, g.player1Client.conn == nil, g.player1Client.isBot)
 	}
@@ -570,6 +570,44 @@ func (h *Hub) handlePlayAgain(client *Client) {
 		bothRequested = true
 	}
 
+	// For friend mode: if not both requested yet, set a timeout to auto-cancel if opponent doesn't respond
+	if !bothRequested && g.player1Client != nil && g.player2Client != nil && !g.player1Client.isBot && !g.player2Client.isBot {
+		// Friend mode (both human players): start timeout timer if not already set
+		if len(g.PlayAgainRequests) == 1 {
+			// First player requested, start timeout for second player to respond
+			go func() {
+				time.Sleep(15 * time.Second) // 15 second timeout for friend mode rematch
+				h.mu.Lock()
+				defer h.mu.Unlock()
+
+				// Check if rematch was already started or if timeout should trigger
+				if _, stillExists := h.activeGames[g.game.ID]; stillExists && len(g.PlayAgainRequests) < 2 {
+					log.Printf("[BACKEND-PLAYAGAIN] Rematch timeout: opponent didn't respond within 15s for gameID=%s", g.game.ID)
+					// Notify first player that rematch was cancelled due to timeout
+					requester := g.PlayAgainRequests[0]
+					requesterClient := h.findClientUnsafe(requester)
+					if requesterClient != nil && requesterClient.send != nil {
+						timeoutMsg := GameMessage{
+							Type: "rematchTimeout",
+							Payload: map[string]interface{}{
+								"message": "Opponent did not respond to rematch request within 15 seconds",
+							},
+						}
+						if data, err := json.Marshal(timeoutMsg); err == nil {
+							select {
+							case requesterClient.send <- data:
+								log.Printf("[BACKEND-PLAYAGAIN] Timeout notification sent to %s", requester)
+							default:
+							}
+						}
+					}
+					// Clear rematch request
+					g.PlayAgainRequests = nil
+				}
+			}()
+		}
+	}
+
 	if bothRequested {
 		// Clear old game and start a fresh game with same clients
 		delete(h.activeGames, g.game.ID)
@@ -606,32 +644,31 @@ func (h *Hub) handlePlayAgain(client *Client) {
 				human = p2
 			}
 
-			// Ensure human client has a send channel
-			if human != nil && human.send == nil && human.conn != nil {
-				human.send = make(chan []byte, 256)
-				h.clients[human] = true
-				log.Printf("[BACKEND] Reinitialized send channel for human client %s", human.username)
-			}
-
-			// Create a fresh bot client
-			botClient := &Client{
-				hub:      h,
-				conn:     nil,
-				send:     nil,
-				username: "AI Bot",
-				isBot:    true,
-			}
-
-			// Start rematch between human and new bot client
+			// Ensure human client has a send channel and running writePump before creating gameStart
 			if human != nil {
-				log.Printf("[BACKEND] Starting immediate rematch human=%s vs bot", human.username)
-				h.createGame(human, botClient)
-			} else {
-				// No human found (both nil or both bots?) — fall back to original players
-				log.Printf("[BACKEND] No human found for rematch, falling back to original clients")
-				h.createGame(p1, p2)
+				if human.send == nil && human.conn != nil {
+					human.send = make(chan []byte, 256)
+					// Start writePump in a new goroutine so it can send the gameStart message
+					go human.writePump()
+					log.Printf("[BACKEND] Reinitialized send channel and writePump for human client %s", human.username)
+				}
+
+				// Create a fresh bot client
+				botClient := &Client{
+					hub:      h,
+					conn:     nil,
+					send:     nil,
+					username: "AI Bot",
+					isBot:    true,
+				}
+
+				// Start rematch between human and new bot client asynchronously to avoid blocking
+				go func(human *Client, botClient *Client) {
+					log.Printf("[BACKEND] Starting immediate rematch human=%s vs bot", human.username)
+					h.createGame(human, botClient)
+				}(human, botClient)
+				return
 			}
-			return
 		}
 
 		// Normal rematch between two human players
@@ -681,6 +718,9 @@ func (h *Hub) handleExit(client *Client) {
 		}
 		otherClient.gameID = ""
 	}
+
+	// Clear PlayAgainRequests to prevent stale rematch state
+	g.PlayAgainRequests = nil
 
 	// Remove game and clear client's gameID
 	delete(h.activeGames, client.gameID)

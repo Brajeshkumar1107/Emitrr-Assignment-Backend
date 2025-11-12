@@ -94,7 +94,9 @@ func main() {
 	// Define allowed origins
 	allowedOrigins := []string{
 		"https://emitrr-assignment-frontend-9xvs.vercel.app",
+		"https://emitrr-assignment-frontend-9xvs.vercel.app/",
 		"http://localhost:3000",
+		"http://localhost:3001",
 		"http://localhost:5173",
 	}
 
@@ -134,10 +136,10 @@ func main() {
 	// Handle WebSocket connections
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		
+
 		// Log the connection attempt
 		log.Printf("WebSocket connection attempt from origin: %s", origin)
-		
+
 		// Check if origin is allowed
 		if origin != "" && !isOriginAllowed(origin) {
 			log.Printf("WebSocket connection rejected - origin not allowed: %s", origin)

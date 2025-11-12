@@ -12,23 +12,14 @@ import (
 
 // Hub maintains the set of active clients and broadcasts messages
 type Hub struct {
-	// Registered clients
-	clients map[*Client]bool
-
-	// Register requests from the clients
-	register chan *Client
-
-	// Unregister requests from clients
-	unregister chan *Client
-
-	// Game management
-	waitingPlayer *Client
-	activeGames   map[string]*WSGame
-	mu            sync.Mutex
-
-	// Optional database and analytics (can be nil)
-	db       *database.DB
-	producer interface{} // *analytics.Producer - using interface{} to avoid circular import
+	clients        map[*Client]bool
+	register       chan *Client
+	unregister     chan *Client
+	waitingPlayer  *Client
+	activeGames    map[string]*WSGame
+	mu             sync.Mutex
+	db             *database.DB
+	producer       interface{}
 }
 
 // Client represents a connected player
@@ -39,8 +30,8 @@ type Client struct {
 	username        string
 	gameID          string
 	isBot           bool
-	disconnectedAt  *time.Time  // Time of disconnect, nil if connected
-	waitingBotTimer *time.Timer // Timer for bot fallback in friend mode
+	disconnectedAt  *time.Time
+	waitingBotTimer *time.Timer
 }
 
 // Message represents the WebSocket message structure
@@ -59,7 +50,6 @@ func NewHub() *Hub {
 	}
 }
 
-// SetDB sets the database connection (optional)
 // SetDB sets the database connection (optional)
 func (h *Hub) SetDB(db *database.DB) {
 	h.mu.Lock()
@@ -80,15 +70,13 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
-			// Don't call handleNewPlayer here - it will be called when join message is received
 
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
-				// Safely close the channel
 				if client.send != nil {
 					close(client.send)
-					client.send = nil // Set to nil to prevent double-close
+					client.send = nil
 				}
 				h.handlePlayerDisconnect(client)
 			}
@@ -100,7 +88,6 @@ func (h *Hub) Run() {
 func (h *Hub) handleNewPlayer(client *Client, gameMode string) {
 	log.Printf("[BACKEND-10] Hub.handleNewPlayer: Called for username=%s, mode=%s", client.username, gameMode)
 
-	// Try to reconnect first
 	if h.reconnectClient(client) {
 		log.Printf("[BACKEND-10] Hub.handleNewPlayer: Successfully reconnected %s to existing game", client.username)
 		return
@@ -110,65 +97,42 @@ func (h *Hub) handleNewPlayer(client *Client, gameMode string) {
 	defer h.mu.Unlock()
 
 	if gameMode == "computer" {
-		// Immediately create game with bot
 		log.Printf("[BACKEND-11] Hub.handleNewPlayer: COMPUTER MODE - Creating immediate bot game for %s", client.username)
 		botClient := &Client{
 			hub:      h,
-			conn:     nil, // Bot doesn't need WebSocket connection
-			send:     nil, // Bot doesn't need send channel
+			conn:     nil,
+			send:     nil,
 			username: "AI Bot",
 			isBot:    true,
 		}
-		log.Printf("[BACKEND-12] Hub.handleNewPlayer: Bot client created, calling createGame(user=%s, bot=AI Bot)", client.username)
+		h.clients[botClient] = true
 		h.createGame(client, botClient)
-	} else if h.waitingPlayer == nil {
-		// Friend mode - wait for another player
-		log.Printf("[BACKEND-11] Hub.handleNewPlayer: FRIEND MODE - No waiting player, setting %s as waiting", client.username)
-		h.waitingPlayer = client
-		// Send waiting message to client
-		log.Printf("[BACKEND-12] Hub.handleNewPlayer: Sending waiting message to %s", client.username)
-		h.sendWaitingMessage(client)
+		return
+	}
 
-		// Start 10-second bot fallback timer for initial matchmaking
-		log.Printf("[BACKEND-13] Hub.handleNewPlayer: Starting 10-second bot matchmaking timer for %s", client.username)
+	if h.waitingPlayer == nil {
+		h.waitingPlayer = client
+		h.sendWaitingMessage(client)
 		client.waitingBotTimer = time.AfterFunc(10*time.Second, func() {
 			h.mu.Lock()
 			defer h.mu.Unlock()
-
-			// Check if player is still waiting and no one joined
 			if h.waitingPlayer == client {
-				log.Printf("[BACKEND-14] Hub.handleNewPlayer: 10-second timer expired, creating bot game for %s", client.username)
 				h.waitingPlayer = nil
-
-				// Create bot client
 				botClient := &Client{
 					hub:      h,
-					conn:     nil, // Bot doesn't need WebSocket connection
-					send:     nil, // Bot doesn't need send channel
 					username: "AI Bot",
 					isBot:    true,
 				}
-
-				// Create game with bot
+				h.clients[botClient] = true
 				h.createGame(client, botClient)
-			} else {
-				log.Printf("[BACKEND-14] Hub.handleNewPlayer: Timer expired but player %s is no longer waiting (matched with another player)", client.username)
 			}
 		})
 	} else {
-		// Another player is waiting - create game
 		waiting := h.waitingPlayer
-		log.Printf("[BACKEND-11] Hub.handleNewPlayer: FRIEND MODE - Found waiting player %s, creating game with %s", waiting.username, client.username)
-
-		// Stop the bot fallback timer if it's running
 		if waiting.waitingBotTimer != nil {
 			waiting.waitingBotTimer.Stop()
-			waiting.waitingBotTimer = nil
-			log.Printf("[BACKEND-12] Hub.handleNewPlayer: Stopped bot fallback timer for %s (matched with %s)", waiting.username, client.username)
 		}
-
 		h.waitingPlayer = nil
-		log.Printf("[BACKEND-12] Hub.handleNewPlayer: Calling createGame(waiting=%s, new=%s)", waiting.username, client.username)
 		h.createGame(waiting, client)
 	}
 }
@@ -178,231 +142,59 @@ func (h *Hub) handlePlayerDisconnect(client *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Set disconnection time
 	now := time.Now()
 	client.disconnectedAt = &now
 
-	// Remove from waiting if they were waiting
 	if h.waitingPlayer == client {
-		// Stop the bot fallback timer if it's running
 		if client.waitingBotTimer != nil {
 			client.waitingBotTimer.Stop()
-			client.waitingBotTimer = nil
-			log.Printf("[BACKEND] Stopped bot fallback timer for disconnected waiting player %s", client.username)
 		}
 		h.waitingPlayer = nil
 		return
 	}
 
-	if client.gameID != "" {
-		g, exists := h.activeGames[client.gameID]
-		if !exists {
-			return
-		}
+	if client.gameID == "" {
+		return
+	}
 
-		// Start bot fallback timer (10 seconds) for friend mode
-		if !client.isBot {
-			if client.waitingBotTimer != nil {
-				client.waitingBotTimer.Stop()
-			}
-			client.waitingBotTimer = time.AfterFunc(10*time.Second, func() {
-				h.mu.Lock()
-				defer h.mu.Unlock()
+	g, exists := h.activeGames[client.gameID]
+	if !exists {
+		return
+	}
 
-				// Check if player has reconnected
-				if client.disconnectedAt != nil && g.game.IsActive {
-					log.Printf("[BACKEND] Bot fallback timer triggered for player %s", client.username)
-
-					// Create bot client to replace disconnected player
-					botClient := &Client{
-						hub:      h,
-						conn:     nil,
-						send:     nil,
-						username: "AI Bot",
-						isBot:    true,
-						gameID:   client.gameID,
-					}
-
-					// Update game with bot
-					if g.game.Player1.ID == client.username {
-						g.game.Player1.ID = botClient.username
-					} else {
-						g.game.Player2.ID = botClient.username
-					}
-
-					// Notify other player about bot replacement
-					var otherClient *Client
-					if g.game.Player1.ID == client.username {
-						otherClient = h.findClientUnsafe(g.game.Player2.ID)
-					} else {
-						otherClient = h.findClientUnsafe(g.game.Player1.ID)
-					}
-
-					if otherClient != nil && otherClient.send != nil {
-						state := g.ToGameState()
-						msg := GameMessage{
-							Type:   "playerReplaced",
-							GameID: g.game.ID,
-							Payload: map[string]interface{}{
-								"replacedPlayer": client.username,
-								"newPlayer":      "AI Bot",
-								"gameState":      state,
-							},
-						}
-						if data, err := json.Marshal(msg); err == nil {
-							select {
-							case otherClient.send <- data:
-							default:
-								// Safely close the channel
-								func() {
-									defer func() {
-										if r := recover(); r != nil {
-											// Channel already closed, ignore panic
-										}
-									}()
-									if otherClient.send != nil {
-										close(otherClient.send)
-										otherClient.send = nil
-									}
-								}()
-							}
-						}
-					}
-
-					// Clean up disconnected client
-					delete(h.clients, client)
-					// Safely close the channel (may already be closed)
-					if client.send != nil {
-						func() {
-							defer func() {
-								if r := recover(); r != nil {
-									// Channel already closed, ignore panic
-									log.Printf("[BACKEND] Channel already closed for client %s", client.username)
-								}
-							}()
-							close(client.send)
-							client.send = nil
-						}()
-					}
-				}
-			})
-		}
-
-		// Start disconnection cleanup timer (30 seconds)
-		time.AfterFunc(30*time.Second, func() {
+	if !client.isBot {
+		client.waitingBotTimer = time.AfterFunc(10*time.Second, func() {
 			h.mu.Lock()
 			defer h.mu.Unlock()
-
-			// If still disconnected after 30 seconds
-			if client.disconnectedAt != nil {
-				if g, exists := h.activeGames[client.gameID]; exists {
-					g.game.IsActive = false
-
-					// Notify other player
-					var otherClient *Client
-					if g.game.Player1.ID == client.username {
-						otherClient = h.findClientUnsafe(g.game.Player2.ID)
-					} else if g.game.Player2.ID == client.username {
-						otherClient = h.findClientUnsafe(g.game.Player1.ID)
-					}
-
-					if otherClient != nil && otherClient.send != nil {
-						state := g.ToGameState()
-						state = g.game.GetState()
-						msg := GameMessage{
-							Type:    "gameState",
-							GameID:  g.game.ID,
-							Payload: state,
-						}
-						if data, err := json.Marshal(msg); err == nil {
-							select {
-							case otherClient.send <- data:
-							default:
-								// Safely close the channel
-								func() {
-									defer func() {
-										if r := recover(); r != nil {
-											// Channel already closed, ignore panic
-										}
-									}()
-									if otherClient.send != nil {
-										close(otherClient.send)
-										otherClient.send = nil
-									}
-								}()
-							}
-						}
-					}
-
-					// Remove game from active games
-					delete(h.activeGames, client.gameID)
+			if client.disconnectedAt != nil && g.game.IsActive {
+				log.Printf("[BACKEND] Bot fallback triggered for player %s", client.username)
+				botClient := &Client{
+					hub:      h,
+					username: "AI Bot",
+					isBot:    true,
 				}
-
-				// Clean up client
-				delete(h.clients, client)
-				// Safely close the channel (may already be closed)
-				if client.send != nil {
-					func() {
-						defer func() {
-							if r := recover(); r != nil {
-								// Channel already closed, ignore panic
-								log.Printf("[BACKEND] Channel already closed for client %s", client.username)
-							}
-						}()
-						close(client.send)
-						client.send = nil
-					}()
+				h.clients[botClient] = true
+				if g.game.Player1.ID == client.username {
+					g.game.Player1.ID = botClient.username
+				} else {
+					g.game.Player2.ID = botClient.username
 				}
 			}
 		})
 	}
-}
 
-// findClientUnsafe finds a client without locking (must be called with lock held)
-func (h *Hub) findClientUnsafe(username string) *Client {
-	for client := range h.clients {
-		if client.username == username {
-			return client
+	time.AfterFunc(30*time.Second, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if client.disconnectedAt != nil {
+			delete(h.activeGames, client.gameID)
+			delete(h.clients, client)
+			if client.send != nil {
+				close(client.send)
+				client.send = nil
+			}
 		}
-	}
-	return nil
-}
-
-// sendWaitingMessage sends a waiting status to the client
-func (h *Hub) sendWaitingMessage(client *Client) {
-	log.Printf("[BACKEND-14] Hub.sendWaitingMessage: Sending waiting message to %s", client.username)
-	if client.send == nil {
-		log.Printf("[BACKEND-14] Hub.sendWaitingMessage: Client %s has no send channel", client.username)
-		return
-	}
-
-	// Create a proper board structure
-	board := make([][]int, 6)
-	for i := range board {
-		board[i] = make([]int, 7)
-	}
-
-	msg := GameMessage{
-		Type:   "gameState",
-		GameID: "",
-		Payload: map[string]interface{}{
-			"status":      "waiting",
-			"board":       board,
-			"currentTurn": 1,
-		},
-	}
-
-	if data, err := json.Marshal(msg); err == nil {
-		log.Printf("[BACKEND-15] Hub.sendWaitingMessage: Waiting message marshaled, sending to %s", client.username)
-		select {
-		case client.send <- data:
-			log.Printf("[BACKEND-16] Hub.sendWaitingMessage: Waiting message sent to %s", client.username)
-		default:
-			log.Printf("[BACKEND-15] Hub.sendWaitingMessage: Failed to send waiting message to %s (channel full)", client.username)
-		}
-	} else {
-		log.Printf("[BACKEND-15] Hub.sendWaitingMessage: Error marshaling waiting message: %v", err)
-	}
+	})
 }
 
 // reconnectClient attempts to reconnect a previously disconnected client
@@ -410,7 +202,6 @@ func (h *Hub) reconnectClient(client *Client) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Find existing client with same username
 	var existingClient *Client
 	for c := range h.clients {
 		if c.username == client.username && c.disconnectedAt != nil {
@@ -420,88 +211,72 @@ func (h *Hub) reconnectClient(client *Client) bool {
 	}
 
 	if existingClient == nil {
-		return false // No disconnected client found
+		return false
 	}
 
-	// Check if within 30-second window
 	if time.Since(*existingClient.disconnectedAt) > 30*time.Second {
-		return false // Reconnection window expired
+		return false
 	}
 
-	// Stop any pending timers
 	if existingClient.waitingBotTimer != nil {
 		existingClient.waitingBotTimer.Stop()
-		existingClient.waitingBotTimer = nil
 	}
 
-	// Transfer game state to new connection
 	client.gameID = existingClient.gameID
 	client.send = make(chan []byte, 256)
+	delete(h.clients, existingClient)
+	h.clients[client] = true
+	client.disconnectedAt = nil
 
-	// Update game references
 	if g, exists := h.activeGames[client.gameID]; exists {
 		if g.game.Player1.ID == client.username {
 			g.player1Client = client
 		} else if g.game.Player2.ID == client.username {
 			g.player2Client = client
 		}
-
-		// Send current game state
-		state := g.ToGameState()
-		msg := GameMessage{
-			Type:    "gameState",
-			GameID:  g.game.ID,
-			Payload: state,
-		}
-		if data, err := json.Marshal(msg); err == nil {
-			select {
-			case client.send <- data:
-				log.Printf("[BACKEND] Successfully sent game state to reconnected client %s", client.username)
-			default:
-				log.Printf("[BACKEND] Failed to send game state to reconnected client %s", client.username)
-			}
-		}
-
-		// Notify other player about reconnection
-		var otherClient *Client
-		if g.game.Player1.ID == client.username {
-			otherClient = h.findClientUnsafe(g.game.Player2.ID)
-		} else {
-			otherClient = h.findClientUnsafe(g.game.Player1.ID)
-		}
-
-		if otherClient != nil && otherClient.send != nil {
-			msg := GameMessage{
-				Type:   "playerReconnected",
-				GameID: g.game.ID,
-				Payload: map[string]interface{}{
-					"username": client.username,
-				},
-			}
-			if data, err := json.Marshal(msg); err == nil {
-				select {
-				case otherClient.send <- data:
-					log.Printf("[BACKEND] Notified other player about reconnection of %s", client.username)
-				default:
-					log.Printf("[BACKEND] Failed to notify other player about reconnection of %s", client.username)
-				}
-			}
-		}
 	}
-
-	// Remove old client and register new one
-	delete(h.clients, existingClient)
-	h.clients[client] = true
-	client.disconnectedAt = nil // Reset disconnection time
 
 	log.Printf("[BACKEND] Successfully reconnected client %s", client.username)
 	return true
 }
 
-// handlePlayAgain handles a client's request to play again after a finished game.
+// sendWaitingMessage sends waiting status to client
+func (h *Hub) sendWaitingMessage(client *Client) {
+	if client.send == nil {
+		return
+	}
+
+	board := make([][]int, 6)
+	for i := range board {
+		board[i] = make([]int, 7)
+	}
+
+	msg := GameMessage{
+		Type:   "gameState",
+		Payload: map[string]interface{}{
+			"status":      "waiting",
+			"board":       board,
+			"currentTurn": 1,
+		},
+	}
+
+	if data, err := json.Marshal(msg); err == nil {
+		select {
+		case client.send <- data:
+		default:
+		}
+	}
+}
+
+// handlePlayAgain handles a client's request to play again
 func (h *Hub) handlePlayAgain(client *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if client.conn == nil {
+		log.Printf("[BACKEND-PLAYAGAIN] Ignoring playAgain from disconnected client %s", client.username)
+		return
+	}
 
 	if client.gameID == "" {
 		return
@@ -510,13 +285,10 @@ func (h *Hub) handlePlayAgain(client *Client) {
 	if !exists {
 		return
 	}
-
-	// Do not accept play-again while game is still active
 	if g.game.IsActive {
 		return
 	}
 
-	// Avoid duplicate requests
 	for _, u := range g.PlayAgainRequests {
 		if u == client.username {
 			return
@@ -524,45 +296,22 @@ func (h *Hub) handlePlayAgain(client *Client) {
 	}
 	g.PlayAgainRequests = append(g.PlayAgainRequests, client.username)
 
-	// Debug: log current playAgain request and client/game status
-	log.Printf("[BACKEND-PLAYAGAIN] Received playAgain from %s for gameID=%s, total requests=%d", client.username, client.gameID, len(g.PlayAgainRequests))
-	if g.player1Client != nil {
-		log.Printf("[BACKEND-PLAYAGAIN] player1=%s sendNil=%v connNil=%v isBot=%v", g.player1Client.username, g.player1Client.send == nil, g.player1Client.conn == nil, g.player1Client.isBot)
-	}
-	if g.player2Client != nil {
-		log.Printf("[BACKEND-PLAYAGAIN] player2=%s sendNil=%v connNil=%v isBot=%v", g.player2Client.username, g.player2Client.send == nil, g.player2Client.conn == nil, g.player2Client.isBot)
-	}
-
-	// Broadcast playAgainUpdate to both players
-	payload := map[string]interface{}{
-		"playAgainRequests": g.PlayAgainRequests,
-	}
 	msg := GameMessage{
-		Type:    "playAgainUpdate",
-		GameID:  g.game.ID,
-		Payload: payload,
+		Type: "playAgainUpdate",
+		Payload: map[string]interface{}{
+			"playAgainRequests": g.PlayAgainRequests,
+		},
 	}
 	if data, err := json.Marshal(msg); err == nil {
 		if p1 := h.findClientUnsafe(g.game.Player1.ID); p1 != nil && p1.send != nil {
-			select {
-			case p1.send <- data:
-			default:
-			}
+			select { case p1.send <- data: default: }
 		}
 		if p2 := h.findClientUnsafe(g.game.Player2.ID); p2 != nil && p2.send != nil {
-			select {
-			case p2.send <- data:
-			default:
-			}
+			select { case p2.send <- data: default: }
 		}
 	}
 
-	// If both human players requested rematch, or one player is a bot, start rematch
-	bothRequested := false
-	if len(g.PlayAgainRequests) >= 2 {
-		bothRequested = true
-	}
-	// If either player is a bot, treat as accepted
+	bothRequested := len(g.PlayAgainRequests) >= 2
 	if g.player1Client != nil && g.player1Client.isBot {
 		bothRequested = true
 	}
@@ -570,73 +319,13 @@ func (h *Hub) handlePlayAgain(client *Client) {
 		bothRequested = true
 	}
 
-	// For friend mode: if not both requested yet, set a timeout to auto-cancel if opponent doesn't respond
-	if !bothRequested && g.player1Client != nil && g.player2Client != nil && !g.player1Client.isBot && !g.player2Client.isBot {
-		// Friend mode (both human players): start timeout timer if not already set
-		if len(g.PlayAgainRequests) == 1 {
-			// First player requested, start timeout for second player to respond
-			go func() {
-				time.Sleep(15 * time.Second) // 15 second timeout for friend mode rematch
-				h.mu.Lock()
-				defer h.mu.Unlock()
-
-				// Check if rematch was already started or if timeout should trigger
-				if _, stillExists := h.activeGames[g.game.ID]; stillExists && len(g.PlayAgainRequests) < 2 {
-					log.Printf("[BACKEND-PLAYAGAIN] Rematch timeout: opponent didn't respond within 15s for gameID=%s", g.game.ID)
-					// Notify first player that rematch was cancelled due to timeout
-					requester := g.PlayAgainRequests[0]
-					requesterClient := h.findClientUnsafe(requester)
-					if requesterClient != nil && requesterClient.send != nil {
-						timeoutMsg := GameMessage{
-							Type: "rematchTimeout",
-							Payload: map[string]interface{}{
-								"message": "Opponent did not respond to rematch request within 15 seconds",
-							},
-						}
-						if data, err := json.Marshal(timeoutMsg); err == nil {
-							select {
-							case requesterClient.send <- data:
-								log.Printf("[BACKEND-PLAYAGAIN] Timeout notification sent to %s", requester)
-							default:
-							}
-						}
-					}
-					// Clear rematch request
-					g.PlayAgainRequests = nil
-				}
-			}()
-		}
-	}
-
 	if bothRequested {
-		// Clear old game and start a fresh game with same clients
 		delete(h.activeGames, g.game.ID)
-
 		p1 := g.player1Client
 		p2 := g.player2Client
-
-		// Reset PlayAgainRequests for new game context
 		g.PlayAgainRequests = nil
 
-		// Ensure clients still exist in hub's client map; if not, create placeholders
-		if p1 != nil {
-			p1.gameID = ""
-		}
-		if p2 != nil {
-			p2.gameID = ""
-		}
-
-		log.Printf("[BACKEND] Starting rematch between %v and %v", p1.username, func() string {
-			if p2 != nil {
-				return p2.username
-			}
-			return "(nil)"
-		}())
-
-		// If either side is a bot, ensure immediate rematch with a fresh bot client to avoid
-		// any stale state/timers. Also ensure human clients have a send channel.
 		if (p1 != nil && p1.isBot) || (p2 != nil && p2.isBot) {
-			// Prefer human as player1 for rematch; if player1 is bot, swap
 			var human *Client
 			if p1 != nil && !p1.isBot {
 				human = p1
@@ -644,38 +333,35 @@ func (h *Hub) handlePlayAgain(client *Client) {
 				human = p2
 			}
 
-			// Ensure human client has a send channel
 			if human != nil {
 				if human.send == nil && human.conn != nil {
-					// Only recreate send channel if conn exists but send was closed
 					human.send = make(chan []byte, 256)
-					log.Printf("[BACKEND] Reinitialized send channel for human client %s (connection active)", human.username)
 				}
 
-				// Create a fresh bot client
+				oldGameID := human.gameID
+				human.gameID = ""
+				delete(h.activeGames, oldGameID)
+
 				botClient := &Client{
 					hub:      h,
-					conn:     nil,
-					send:     nil,
 					username: "AI Bot",
 					isBot:    true,
 				}
+				h.clients[botClient] = true
 
-				// Start rematch between human and new bot client asynchronously to avoid blocking
 				go func(human *Client, botClient *Client) {
-					log.Printf("[BACKEND] Starting immediate rematch human=%s vs bot", human.username)
+					log.Printf("[BACKEND] Starting immediate rematch human=%s vs bot (fresh bot instance)", human.username)
 					h.createGame(human, botClient)
 				}(human, botClient)
 				return
 			}
 		}
 
-		// Normal rematch between two human players
 		h.createGame(p1, p2)
 	}
 }
 
-// handleExit handles a client's request to exit the current game.
+// handleExit handles a client's request to exit the game
 func (h *Hub) handleExit(client *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -688,9 +374,7 @@ func (h *Hub) handleExit(client *Client) {
 		return
 	}
 
-	// Mark game inactive and notify the other player
 	g.game.IsActive = false
-
 	var otherClient *Client
 	if g.game.Player1.ID == client.username {
 		otherClient = h.findClientUnsafe(g.game.Player2.ID)
@@ -698,30 +382,31 @@ func (h *Hub) handleExit(client *Client) {
 		otherClient = h.findClientUnsafe(g.game.Player1.ID)
 	}
 
-	// Notify other player that opponent exited
 	if otherClient != nil && otherClient.send != nil {
-		payload := map[string]interface{}{
-			"gameId":  client.gameID,
-			"message": "opponentExited",
-		}
 		msg := GameMessage{
-			Type:    "opponentExited",
-			GameID:  client.gameID,
-			Payload: payload,
+			Type: "opponentExited",
+			Payload: map[string]interface{}{
+				"gameId":  client.gameID,
+				"message": "opponentExited",
+			},
 		}
 		if data, err := json.Marshal(msg); err == nil {
-			select {
-			case otherClient.send <- data:
-			default:
-			}
+			select { case otherClient.send <- data: default: }
 		}
 		otherClient.gameID = ""
 	}
 
-	// Clear PlayAgainRequests to prevent stale rematch state
 	g.PlayAgainRequests = nil
-
-	// Remove game and clear client's gameID
 	delete(h.activeGames, client.gameID)
 	client.gameID = ""
+}
+
+// findClientUnsafe finds a client without locking
+func (h *Hub) findClientUnsafe(username string) *Client {
+	for client := range h.clients {
+		if client.username == username {
+			return client
+		}
+	}
+	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -71,6 +72,9 @@ func NewDB(config Config) (*DB, error) {
 	if err := db.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("error connecting to the database: %v", err)
 	}
+
+	// Debug: log successful DB connection for troubleshooting
+	log.Printf("[DB] Connected to database host=%s dbname=%s", config.Host, config.DBName)
 
 	return &DB{db}, nil
 }

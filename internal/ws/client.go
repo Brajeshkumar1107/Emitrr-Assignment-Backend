@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	writeWait      = 10 * time.Second  // Time allowed to write a message to the peer.
-	pongWait       = 60 * time.Second  // Time allowed to read the next pong message from the peer.
+	writeWait      = 10 * time.Second    // Time allowed to write a message to the peer.
+	pongWait       = 60 * time.Second    // Time allowed to read the next pong message from the peer.
 	pingPeriod     = (pongWait * 9) / 10 // Send pings to peer with this period. Must be less than pongWait.
-	maxMessageSize = 512               // Maximum message size allowed from peer.
+	maxMessageSize = 512                 // Maximum message size allowed from peer.
 )
 
 // ServeWs handles WebSocket connection requests and upgrades them
@@ -39,9 +39,9 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 			// ✅ Default allowed origins
 			allowedOrigins := []string{
-				"https://emitrr-assignment-frontend.vercel.app",   // ✅ Current production frontend
+				"https://emitrr-assignment-frontend.vercel.app",      // ✅ Current production frontend
 				"https://emitrr-assignment-frontend-9xvs.vercel.app", // Optional old Vercel deploy
-				"http://localhost:3000", // Local React dev server
+				"http://localhost:3000",                              // Local React dev server
 				"http://127.0.0.1:3000",
 				"http://localhost:5173",
 				"http://127.0.0.1:5173",

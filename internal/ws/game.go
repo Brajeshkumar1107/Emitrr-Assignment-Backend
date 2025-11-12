@@ -425,10 +425,16 @@ func (h *Hub) storeGameResult(g *WSGame, winner int, isDraw bool) {
 func (h *Hub) createGame(player1, player2 *Client) {
 	log.Printf("[BACKEND-14] Hub.createGame: Creating game between player1=%s, player2=%s (isBot=%v)", player1.username, player2.username, player2.isBot)
 
-	g := game.NewGame(
+	// Call NewGame with database (can be nil) and handle error
+	g, err := game.NewGame(
+		h.db,
 		game.Player{ID: player1.username, Username: player1.username},
 		game.Player{ID: player2.username, Username: player2.username, IsBot: player2.isBot},
 	)
+	if err != nil {
+		log.Printf("[BACKEND-14] Hub.createGame: Error creating game: %v", err)
+		return
+	}
 
 	log.Printf("[BACKEND-15] Hub.createGame: Game created with ID=%s, CurrentTurn=%d", g.ID, g.CurrentTurn)
 	player1.gameID = g.ID
